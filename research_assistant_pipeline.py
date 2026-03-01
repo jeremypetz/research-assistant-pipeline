@@ -958,15 +958,21 @@ class Pipeline:
         __event_emitter__=None,
     ) -> Union[str, Generator, Iterator]:
         """
-        Main entry point. Status updates are sent through __event_emitter__ so
-        Open-WebUI renders them in a collapsible panel (shows latest status,
-        expandable to see full log). Only the final report is yielded as chat text.
+        Main entry point. Status updates are sent through __event_emitter__ when
+        available (renders as a collapsible panel in Open-WebUI). Falls back to
+        yielding inline text so messages are always visible regardless of version.
+        Only the final report is yielded as substantive chat content.
         """
         import logging
         import asyncio
 
-        def emit_status(msg: str, done: bool = False) -> None:
-            """Send a status event to Open-WebUI's collapsible status panel."""
+        def status(msg: str, done: bool = False):
+            """
+            Generator: tries __event_emitter__ first (collapsible panel), falls
+            back to yielding the message as inline text if the emitter is absent
+            or raises. This guarantees status messages are always visible.
+            """
+            emitted = False
             if __event_emitter__:
                 try:
                     loop = asyncio.new_event_loop()
@@ -975,10 +981,13 @@ class Pipeline:
                             "type": "status",
                             "data": {"description": msg, "done": done},
                         }))
+                        emitted = True
                     finally:
                         loop.close()
                 except Exception:
                     pass
+            if not emitted:
+                yield f"\n{msg}\n"
 
         # Skip Open-WebUI internal tasks (title generation, follow-ups, tags, etc.)
         user_lower = user_message.lower()
@@ -991,7 +1000,7 @@ class Pipeline:
             yield "(internal task skipped)"
             return
 
-        emit_status("🔍 Parsing query...")
+        yield from status("🔍 Parsing query...")
 
         # --- Parse depth/credibility from the RAW message BEFORE extraction ---
         # This ensures depth:thorough / credibility:high are captured even if
@@ -1071,36 +1080,37 @@ class Pipeline:
         depth_display = final_depth.upper() if final_depth != default_depth else f"{default_depth.upper()} (default)"
         cred_display = final_cred.upper() if final_cred != default_cred else f"{default_cred.upper()} (default)"
         provider_name = (self.valves.SEARCH_PROVIDER or "tavily").lower().strip()
-        emit_status(
+        yield from status(
             f"📋 Depth: {depth_display} | Credibility: {cred_display} | "
             f"Provider: {provider_name} | Extraction: {extraction_method}"
         )
 
         if not clean_query:
-            emit_status("❌ No research topic found after parsing.", done=True)
+            yield from status("❌ No research topic found after parsing.", done=True)
             yield "\n❌ No research topic found after parsing. Please enter a topic to research.\n"
             return
 
-        emit_status(f'🎯 Topic: "{clean_query}"')
+        yield from status(f'🎯 Topic: "{clean_query}"')
 
         # Delegate to the research pipeline generator
-        yield from self._run_research(final_message, body, emit_status)
+        yield from self._run_research(final_message, body, status)
 
-    def _run_research(self, user_message: str, body: dict, emit_status=None) -> Generator:
+    def _run_research(self, user_message: str, body: dict, status_fn=None) -> Generator:
         """
         Synchronous generator that orchestrates the full research pipeline.
         Uses synchronous wrappers around the async helpers since Open WebUI
         consumes generators synchronously.
 
-        emit_status(msg, done=False) — callable provided by pipe() that sends
-        status events to Open-WebUI's collapsible status panel. If None (e.g.
-        when called directly in tests), status messages are silently dropped.
+        status_fn(msg, done=False) — generator function provided by pipe() that
+        tries __event_emitter__ and falls back to yielding inline text. Defaults
+        to inline-text-only when called directly (e.g. in tests).
         """
         import asyncio
 
-        # Fallback: no-op if no emitter was supplied
-        if emit_status is None:
-            emit_status = lambda msg, done=False: None
+        # Default: yield inline text (used when called outside of pipe(), e.g. tests)
+        if status_fn is None:
+            def status_fn(msg: str, done: bool = False):
+                yield f"\n{msg}\n"
 
         # ── Parse input ──
         topic, depth_key, cred_level = parse_input(
@@ -1109,14 +1119,14 @@ class Pipeline:
             self.valves.DEFAULT_CREDIBILITY,
         )
         if not topic:
-            emit_status("❌ No research topic provided.", done=True)
+            yield from status_fn("❌ No research topic provided.", done=True)
             yield "❌ No research topic provided. Please enter a topic to research."
             return
 
         # ── Validate search provider config ──
         provider_name = (self.valves.SEARCH_PROVIDER or "tavily").lower().strip()
         if provider_name == "tavily" and not self.valves.TAVILY_API_KEY:
-            emit_status("❌ Tavily API key not configured.", done=True)
+            yield from status_fn("❌ Tavily API key not configured.", done=True)
             yield "❌ Tavily API key not configured. Set it in the pipeline Valves, or switch SEARCH_PROVIDER to 'searxng'."
             return
 
@@ -1135,36 +1145,36 @@ class Pipeline:
             # STAGE 1: Auto-routing classification
             # ──────────────────────────────────────────
             if depth_key == "auto":
-                emit_status("🔀 Auto-routing: classifying query complexity...")
+                yield from status_fn("🔀 Auto-routing: classifying query complexity...")
                 class_prompt = build_classification_prompt(topic)
                 class_response = run_async(complete(class_prompt, self.valves))
                 classification = parse_classification(class_response)
 
                 if classification == "SIMPLE":
-                    emit_status("🔀 Auto-routing: SIMPLE — quick single-pass search")
+                    yield from status_fn("🔀 Auto-routing: SIMPLE — quick single-pass search")
                     tavily_topic = detect_tavily_topic(topic)
-                    emit_status(f'🔍 Quick search: "{topic}" (category: {tavily_topic})')
+                    yield from status_fn(f'🔍 Quick search: "{topic}" (category: {tavily_topic})')
 
                     simple_results = run_async(
                         search_provider.search(topic, SIMPLE_PRESET["resultsPerPass"], topic=tavily_topic)
                     )
                     if not simple_results:
-                        emit_status("❌ Quick search returned no results.", done=True)
+                        yield from status_fn("❌ Quick search returned no results.", done=True)
                         yield "\n❌ Quick search returned no results. Try rephrasing your query or using depth:fast.\n"
                         return
 
                     simple_sources = extract_sources(simple_results, SIMPLE_PRESET["maxCharsPerSnippet"])
-                    emit_status(f"✅ Found {len(simple_sources)} sources. Synthesizing answer...")
+                    yield from status_fn(f"✅ Found {len(simple_sources)} sources. Synthesizing answer...")
 
                     answer_prompt = build_simple_answer_prompt(topic, simple_sources)
                     answer_body = run_async(complete(answer_prompt, self.valves))
                     if not answer_body or not answer_body.strip():
-                        emit_status("❌ Answer synthesis returned empty.", done=True)
+                        yield from status_fn("❌ Answer synthesis returned empty.", done=True)
                         yield "\n❌ Answer synthesis returned empty. Try again or use depth:fast.\n"
                         return
 
                     simple_report = assemble_simple_report(answer_body, simple_sources, topic, provider_name)
-                    emit_status(f"✅ Quick search complete! ({len(simple_report)} chars)", done=True)
+                    yield from status_fn(f"✅ Quick search complete! ({len(simple_report)} chars)", done=True)
                     yield f"\n{simple_report}"
                     return
 
@@ -1175,7 +1185,7 @@ class Pipeline:
                     "RESEARCH-THOROUGH": "thorough",
                 }
                 depth_key = depth_map.get(classification, "standard")
-                emit_status(f"🔀 Auto-routing: {classification} → depth {depth_key.upper()} — proceeding with deep research")
+                yield from status_fn(f"🔀 Auto-routing: {classification} → depth {depth_key.upper()} — proceeding with deep research")
 
             # ──────────────────────────────────────────
             # STAGE 2: Resolve preset
@@ -1191,12 +1201,12 @@ class Pipeline:
 
             tavily_topic = detect_tavily_topic(topic)
 
-            emit_status(f'🔍 Starting deep research on: "{topic}"')
-            emit_status(
+            yield from status_fn(f'🔍 Starting deep research on: "{topic}"')
+            yield from status_fn(
                 f"📋 Depth: {depth_key.upper()} | Credibility: {cred_level.upper()} | "
                 f"Search category: {tavily_topic} | Provider: {provider_name}"
             )
-            emit_status(
+            yield from status_fn(
                 f"⚙️ Settings: max {_max_passes} passes | {_results_per_pass} results/pass | "
                 f"eval={_eval_snippet_limit} | controversy={_controversy_snippet_limit} | "
                 f"report={_report_snippet_limit} snippets | "
@@ -1205,7 +1215,7 @@ class Pipeline:
 
             est_tokens = _report_snippet_limit * _report_max_chars_per_snippet / 4
             if est_tokens > 20000:
-                emit_status(f"⚠️ Estimated report-prompt token load: ~{round(est_tokens):,}. If your model has a small context window, consider a lower depth.")
+                yield from status_fn(f"⚠️ Estimated report-prompt token load: ~{round(est_tokens):,}. If your model has a small context window, consider a lower depth.")
 
             all_sources: list = []
             current_query = topic
@@ -1218,26 +1228,26 @@ class Pipeline:
             # ──────────────────────────────────────────
             while continue_research and pass_count < _max_passes:
                 pass_count += 1
-                emit_status(f'📡 Search pass {pass_count}/{_max_passes}: "{current_query}"')
+                yield from status_fn(f'📡 Search pass {pass_count}/{_max_passes}: "{current_query}"')
 
                 search_results = run_async(
                     search_provider.search(current_query, _results_per_pass, topic=tavily_topic)
                 )
 
                 if not search_results:
-                    emit_status(f"⚠️ No results returned on pass {pass_count}. Stopping search loop.")
+                    yield from status_fn(f"⚠️ No results returned on pass {pass_count}. Stopping search loop.")
                     break
 
                 quality = assess_content_quality(search_results)
-                emit_status(f"📊 Content quality: {quality['summary']}")
+                yield from status_fn(f"📊 Content quality: {quality['summary']}")
 
                 sources = extract_sources(search_results, _max_chars_per_snippet)
                 all_sources = deduplicate_sources(all_sources + sources)
 
                 search_log.append({"pass": pass_count, "query": current_query, "results": len(search_results)})
-                emit_status(f"✅ Pass {pass_count} complete. Total unique sources: {len(all_sources)}")
+                yield from status_fn(f"✅ Pass {pass_count} complete. Total unique sources: {len(all_sources)}")
 
-                emit_status(f"🧠 Evaluating research completeness after pass {pass_count}...")
+                yield from status_fn(f"🧠 Evaluating research completeness after pass {pass_count}...")
                 eval_prompt = build_evaluation_prompt(
                     topic, all_sources, pass_count, _max_passes, _eval_snippet_limit
                 )
@@ -1245,10 +1255,10 @@ class Pipeline:
                 decision = parse_evaluation(eval_response)
 
                 if decision["continueSearch"]:
-                    emit_status(f'🤔 LLM Decision: Continue — "{decision["nextQuery"]}"')
+                    yield from status_fn(f'🤔 LLM Decision: Continue — "{decision["nextQuery"]}"')
                 else:
-                    emit_status("🤔 LLM Decision: Sufficient — ready to write report")
-                emit_status(f'📋 Reason: {decision["reason"]}')
+                    yield from status_fn("🤔 LLM Decision: Sufficient — ready to write report")
+                yield from status_fn(f'📋 Reason: {decision["reason"]}')
 
                 if decision["continueSearch"] and decision["nextQuery"]:
                     current_query = decision["nextQuery"]
@@ -1256,13 +1266,13 @@ class Pipeline:
                     continue_research = False
 
             if pass_count >= _max_passes:
-                emit_status(f"⚠️ Reached maximum search passes ({_max_passes}). Proceeding to analysis.")
+                yield from status_fn(f"⚠️ Reached maximum search passes ({_max_passes}). Proceeding to analysis.")
 
             # ──────────────────────────────────────────
             # STAGE 4: Counter-perspective search
             # ──────────────────────────────────────────
             if preset["enableCounterPerspective"]:
-                emit_status("🔄 Running counter-perspective search...")
+                yield from status_fn("🔄 Running counter-perspective search...")
                 counter_query = f"{topic} criticism OR controversy OR problems OR limitations"
                 counter_results = run_async(
                     search_provider.search(counter_query, _results_per_pass, topic=tavily_topic)
@@ -1271,23 +1281,23 @@ class Pipeline:
                     counter_sources = extract_sources(counter_results, _max_chars_per_snippet)
                     all_sources = deduplicate_sources(all_sources + counter_sources)
                     search_log.append({"pass": "counter", "query": counter_query, "results": len(counter_results)})
-                    emit_status(f"✅ Counter-perspective: +{len(counter_results)} results. Total unique: {len(all_sources)}")
+                    yield from status_fn(f"✅ Counter-perspective: +{len(counter_results)} results. Total unique: {len(all_sources)}")
                 else:
-                    emit_status("⚠️ Counter-perspective search returned no results.")
+                    yield from status_fn("⚠️ Counter-perspective search returned no results.")
 
             # ──────────────────────────────────────────
             # STAGE 5: Subtopic deep-dive
             # ──────────────────────────────────────────
             if preset["enableSubtopicDive"]:
-                emit_status("🔬 Identifying key subtopics for deep-dive...")
+                yield from status_fn("🔬 Identifying key subtopics for deep-dive...")
                 subtopic_prompt = build_subtopic_prompt(topic, all_sources, _eval_snippet_limit)
                 subtopic_response = run_async(complete(subtopic_prompt, self.valves))
                 subtopics = parse_subtopics(subtopic_response)
 
                 if subtopics:
-                    emit_status(f"🔬 Deep-diving into {len(subtopics)} subtopics: {', '.join(subtopics)}")
+                    yield from status_fn(f"🔬 Deep-diving into {len(subtopics)} subtopics: {', '.join(subtopics)}")
                     for sub in subtopics:
-                        emit_status(f'  📡 Subtopic search: "{sub}"')
+                        yield from status_fn(f'  📡 Subtopic search: "{sub}"')
                         sub_results = run_async(
                             search_provider.search(sub, _results_per_pass, topic=tavily_topic)
                         )
@@ -1295,32 +1305,32 @@ class Pipeline:
                             sub_sources = extract_sources(sub_results, _max_chars_per_snippet)
                             all_sources = deduplicate_sources(all_sources + sub_sources)
                             search_log.append({"pass": "subtopic", "query": sub, "results": len(sub_results)})
-                            emit_status(f"  ✅ +{len(sub_results)} results. Total unique: {len(all_sources)}")
+                            yield from status_fn(f"  ✅ +{len(sub_results)} results. Total unique: {len(all_sources)}")
                 else:
-                    emit_status("⚠️ No additional subtopics identified.")
+                    yield from status_fn("⚠️ No additional subtopics identified.")
 
             # ──────────────────────────────────────────
             # STAGE 6: Source credibility scoring
             # ──────────────────────────────────────────
             credibility_analysis = ""
             if cred_level != "off":
-                emit_status(f"🏅 Scoring source credibility (level: {cred_level})...")
+                yield from status_fn(f"🏅 Scoring source credibility (level: {cred_level})...")
                 cred_prompt = build_credibility_prompt(topic, all_sources, cred_level, _report_snippet_limit)
                 credibility_analysis = run_async(complete(cred_prompt, self.valves))
-                emit_status("✅ Source credibility analysis complete.")
+                yield from status_fn("✅ Source credibility analysis complete.")
 
             # ──────────────────────────────────────────
             # STAGE 7: Controversy analysis
             # ──────────────────────────────────────────
-            emit_status("⚖️ Analyzing sources for conflicting information and controversy...")
+            yield from status_fn("⚖️ Analyzing sources for conflicting information and controversy...")
             controversy_prompt = build_controversy_prompt(topic, all_sources, _controversy_snippet_limit)
             controversy_analysis = run_async(complete(controversy_prompt, self.valves))
-            emit_status("✅ Controversy analysis complete.")
+            yield from status_fn("✅ Controversy analysis complete.")
 
             # ──────────────────────────────────────────
             # STAGE 8: Report synthesis
             # ──────────────────────────────────────────
-            emit_status(f"📝 Synthesizing final report from {len(all_sources)} unique sources across {len(search_log)} search operations...")
+            yield from status_fn(f"📝 Synthesizing final report from {len(all_sources)} unique sources across {len(search_log)} search operations...")
 
             report_prompt = build_report_prompt(
                 topic, all_sources, controversy_analysis, credibility_analysis,
@@ -1328,22 +1338,22 @@ class Pipeline:
             )
             report_body = run_async(complete(report_prompt, self.valves))
             if not report_body or not report_body.strip():
-                emit_status("❌ Report generation returned empty output.", done=True)
+                yield from status_fn("❌ Report generation returned empty output.", done=True)
                 yield "\n❌ Deep Research: report generation returned empty output. Try reducing depth or using a model with a larger context window.\n"
                 return
 
-            emit_status(f"✅ Report body received ({len(report_body)} chars). Assembling final output...")
+            yield from status_fn(f"✅ Report body received ({len(report_body)} chars). Assembling final output...")
 
             final_report = assemble_final_report(
                 report_body, all_sources, topic, search_log, pass_count,
                 depth_key, cred_level, credibility_analysis, provider_name,
             )
 
-            emit_status(f"✅ Deep research complete! {len(all_sources)} sources | {len(search_log)} searches | {len(final_report):,} chars", done=True)
+            yield from status_fn(f"✅ Deep research complete! {len(all_sources)} sources | {len(search_log)} searches | {len(final_report):,} chars", done=True)
 
             # Yield the full report as chat output
             yield f"\n{final_report}"
 
         except Exception as e:
-            emit_status(f"❌ Error: {e}", done=True)
+            yield from status_fn(f"❌ Error: {e}", done=True)
             yield f"\n❌ Deep Research encountered an error: {e}\n"
