@@ -941,6 +941,9 @@ class Pipeline:
         """
         import logging
         
+        def status(msg: str) -> str:
+            return f"\n{msg}\n"
+
         # Skip Open-WebUI internal tasks (title generation, follow-ups, tags, etc.)
         user_lower = user_message.lower()
         if ("broad tags categorizing" in user_lower) \
@@ -949,7 +952,8 @@ class Pipeline:
                 or ("analyze the chat history to determine" in user_lower) \
                 or ("respond to the user query using" in user_lower) \
                 or user_message.strip().startswith("### Task:"):
-            return "(internal task skipped)"
+            yield "(internal task skipped)"
+            return
         
         # Extract the actual user query
         # Open-WebUI formats messages with system prompts embedded, ending with "Query: <actual query>"
@@ -982,7 +986,17 @@ class Pipeline:
         else:
             logging.info(f"NO EXTRACTION - using full message len={len(user_message)}")
         
-        return self._run_research(actual_user_query, body)
+
+        yield status("\U0001f50d Parsing query...")
+
+        if not actual_user_query.strip():
+            yield "\n\u274c No research topic found after parsing. Please enter a topic to research.\n"
+            return
+
+        yield status(f'\U0001f3af Topic: "{actual_user_query.strip()[:100]}"')
+
+        # Delegate to the research pipeline generator
+        yield from self._run_research(actual_user_query, body)
 
     def _run_research(self, user_message: str, body: dict) -> Generator:
         """
