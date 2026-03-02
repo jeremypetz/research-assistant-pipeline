@@ -1,6 +1,6 @@
-# Research Assistant Pipeline v1.0
+# Research Assistant Pipeline v1.1
 
-A multi-pass deep research pipeline for [Open WebUI](https://github.com/open-webui/open-webui) that performs automated web research with LLM-driven gap analysis, controversy detection, source credibility scoring, and structured report generation.
+A multi-pass deep research pipeline for [Open WebUI](https://github.com/open-webui/open-webui) that performs automated web research with LLM-driven gap analysis, cross-pass scratchpad memory, controversy detection, source credibility scoring, and structured report generation.
 
 ## Features
 
@@ -62,16 +62,42 @@ Four levels of source credibility analysis, configurable per-query:
 | medium | Authority, evidence quality, and bias assessment per source (default) |
 | high | Full assessment including methodology, recency, cross-referencing, and overall reliability warnings |
 
+### Cross-Pass Scratchpad Memory (v1.1)
+
+The pipeline maintains an in-memory **Scratchpad** that accumulates structured research state across all search passes. After each pass, an LLM call generates a compact running summary that merges new findings with previous knowledge.
+
+**What the scratchpad tracks:**
+- **Covered areas** -- aspects of the topic confirmed as well-researched
+- **Open gaps** -- known information gaps that still need investigation
+- **Dead ends** -- queries that returned no useful results (so they are not retried)
+- **Running summary** -- a concise 5-8 bullet summary updated after every pass
+
+**Where the scratchpad is injected:**
+
+| Stage | How it helps |
+|---|---|
+| Evaluation (Stage 3) | Evaluator sees dead ends and gaps, avoids re-searching failed queries, targets real information gaps |
+| Subtopic identification (Stage 5) | Subtopic selector avoids suggesting already well-covered areas |
+| Controversy analysis (Stage 7) | Analyst receives accumulated summary for focused conflict detection |
+| Report synthesis (Stage 8) | Writer gets a structured briefing as an organizational scaffold for better report structure |
+
+**Status output per pass:**
+```
+Scratchpad updated -- 1 covered | 2 gaps | 0 dead ends
+```
+
+**Cost:** One additional LLM call per search pass (~2-3 seconds) to generate the running summary. This is offset by fewer wasted search passes due to smarter gap analysis.
+
 ### 8-Stage Research Pipeline
 
 1. **Query Classification** -- SIMPLE vs RESEARCH routing
 2. **Interactive Settings** -- depth/credibility selection (RESEARCH only)
-3. **Dynamic Search Loop** -- multi-pass search with LLM-driven gap analysis deciding when to continue
+3. **Dynamic Search Loop** -- multi-pass search with LLM-driven gap analysis and scratchpad memory
 4. **Counter-Perspective Search** -- dedicated search for criticism, controversy, and limitations (Standard+)
-5. **Subtopic Deep-Dive** -- LLM identifies under-covered subtopics for additional searches (Thorough only)
+5. **Subtopic Deep-Dive** -- LLM identifies under-covered subtopics, guided by scratchpad (Thorough only)
 6. **Source Credibility Scoring** -- per-source authority, bias, and reliability assessment
-7. **Controversy Analysis** -- conflicting claims, expert disagreement, jurisdictional variance, bias indicators
-8. **Report Synthesis** -- structured report with inline citations, data tables, and confidence ratings
+7. **Controversy Analysis** -- conflicting claims, expert disagreement, jurisdictional variance, informed by scratchpad summary
+8. **Report Synthesis** -- structured report with inline citations, data tables, confidence ratings, and scratchpad briefing
 
 ### Live Status Messages
 
@@ -85,6 +111,7 @@ Search pass 1/4: "health effects of intermittent fasting"
 Content quality: 4/5 rich results | avg 2340 chars | 80% rich
 Evaluating research completeness after pass 1...
 LLM Decision: Continue -- "intermittent fasting long-term studies"
+Scratchpad updated -- 0 covered | 1 gaps | 0 dead ends
 ...
 Synthesizing final report from 23 unique sources...
 Deep research complete!
@@ -199,17 +226,35 @@ User Query
 +------------------+
 | 1. Classification|---> SIMPLE: quick search -> concise answer -> done
 | 2. Settings menu |---> ASK_DEPTH? show menu, wait for reply
-| 3. Search loop   |---> Multi-pass + LLM gap evaluation
+| 3. Search loop   |---> Multi-pass + LLM gap eval + scratchpad memory
 | 4. Counter-persp |---> Criticism/controversy search (Standard+)
-| 5. Subtopic dive |---> Deep-dive on emergent subtopics (Thorough)
+| 5. Subtopic dive |---> Deep-dive, guided by scratchpad (Thorough)
 | 6. Credibility   |---> Per-source scoring
-| 7. Controversy   |---> Conflict analysis across all sources
-| 8. Report        |---> Structured synthesis with citations
+| 7. Controversy   |---> Conflict analysis, informed by scratchpad
+| 8. Report        |---> Synthesis with scratchpad briefing + citations
 +------------------+
        |
        v
   Assembled Report (Markdown)
 ```
+
+## Changelog
+
+### v1.1 (2026-03-01)
+- **Scratchpad memory**: Cross-pass research state tracking with running LLM-generated summaries
+- Scratchpad injected into evaluation, subtopic, controversy, and report prompts for smarter analysis
+- New status message per pass showing scratchpad state
+
+### v1.0 (2026-03-01)
+- Interactive two-turn depth/credibility selection for RESEARCH queries
+- `ASK_DEPTH` valve to enable/disable the interactive prompt
+- Server-side topic storage with message-history fallback
+- Dual search provider support (Tavily, SearXNG+Crawl4AI)
+- Intelligent SIMPLE/RESEARCH auto-routing
+- 3 depth presets (fast/standard/thorough)
+- 4 credibility levels
+- 8-stage research pipeline with live status messages
+- Structured report output with inline citations
 
 ## Known Issues
 
