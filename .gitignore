@@ -27,4 +27,12 @@ test.txt
 
 # Environment variables (if any)
 .env
+
+# Pipeline server auto-generated directories (valves.json storage)
+# Each .py pipeline gets a matching directory created automatically
+Research_Assistant/
+Uncensored_Research_Assistant/
+failed/
+
+# Local-only wrappers (not published to GitHub)
 Uncensored_Research_Assistant.py
