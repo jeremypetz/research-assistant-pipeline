@@ -125,6 +125,86 @@ def parse_settings_reply(text: str) -> tuple:
 
 
 # =============================================================================
+# === SCRATCHPAD ==============================================================
+# =============================================================================
+
+class Scratchpad:
+    """Accumulates structured research state across pipeline stages.
+
+    Tracks what has been covered, what gaps remain, which queries returned
+    nothing, and maintains a running LLM-generated summary so that later
+    passes don't have to re-read all raw snippets.
+    """
+
+    def __init__(self, topic: str):
+        self.topic = topic
+        self.covered: list = []       # aspects confirmed covered
+        self.open_gaps: list = []     # known gaps still needing research
+        self.dead_ends: list = []     # queries that returned nothing
+        self.running_summary: str = ""     # compact summary updated each pass
+
+    def update_after_pass(
+        self,
+        pass_num: int,
+        query: str,
+        had_results: bool,
+        decision: dict,
+    ) -> None:
+        """Record what happened in a search+eval pass."""
+        reason = decision.get("reason", "")
+        if decision.get("continueSearch"):
+            self.open_gaps.append(reason)
+        else:
+            self.covered.append(f"Pass {pass_num}: {reason}")
+        if not had_results:
+            self.dead_ends.append(query)
+
+    def set_summary(self, summary: str) -> None:
+        """Replace the running summary with a fresh one."""
+        if summary and summary.strip():
+            self.running_summary = summary.strip()
+
+    def to_context_block(self) -> str:
+        """Render current state as text for LLM prompts."""
+        parts = ["=== RESEARCH SCRATCHPAD ==="]
+        if self.running_summary:
+            parts.append(f"\nRUNNING SUMMARY:\n{self.running_summary}")
+        if self.open_gaps:
+            parts.append("\nOPEN GAPS:\n" + "\n".join(f"- {g}" for g in self.open_gaps))
+        if self.dead_ends:
+            parts.append("\nDEAD ENDS (do not re-search these):\n" + "\n".join(f"- {d}" for d in self.dead_ends))
+        if self.covered:
+            parts.append("\nCOVERED:\n" + "\n".join(f"- {c}" for c in self.covered))
+        return "\n".join(parts)
+
+    def stats_line(self) -> str:
+        """One-line summary for status messages."""
+        return (
+            f"{len(self.covered)} covered | "
+            f"{len(self.open_gaps)} gaps | "
+            f"{len(self.dead_ends)} dead ends"
+        )
+
+
+def build_summary_prompt(topic: str, scratchpad: "Scratchpad", new_snippets: str) -> str:
+    """Prompt the LLM to produce/update the running research summary."""
+    prev = scratchpad.running_summary
+    prev_block = f"Previous summary:\n{prev}\n\n" if prev else ""
+    return (
+        f"You are a research note-taker. Produce a concise bullet-point summary "
+        f"(5-8 bullets, ~200 words) of everything we now know about the topic.\n\n"
+        f'Topic: "{topic}"\n\n'
+        f"{prev_block}"
+        f"New sources from this pass:\n{new_snippets}\n\n"
+        f"Rules:\n"
+        f"- Merge new information into the existing summary, don't just append.\n"
+        f"- Drop redundant bullets.\n"
+        f"- Keep citations as [n] references where possible.\n"
+        f"- Output ONLY the bullet list, no preamble."
+    )
+
+
+# =============================================================================
 # === HELPERS =================================================================
 # =============================================================================
 
@@ -1229,6 +1309,7 @@ class Pipeline:
             pass_count = 0
             continue_research = True
             search_log: list = []
+            scratchpad = Scratchpad(topic)
 
             # ──────────────────────────────────────────
             # STAGE 3: Dynamic search loop
@@ -1258,6 +1339,9 @@ class Pipeline:
                 eval_prompt = build_evaluation_prompt(
                     topic, all_sources, pass_count, _max_passes, _eval_snippet_limit
                 )
+                # Append scratchpad so evaluator knows what's covered / what to avoid
+                if scratchpad.running_summary or scratchpad.dead_ends:
+                    eval_prompt += f"\n\n{scratchpad.to_context_block()}"
                 eval_response = run_async(complete(eval_prompt, self.valves))
                 decision = parse_evaluation(eval_response)
 
@@ -1266,6 +1350,13 @@ class Pipeline:
                 else:
                     yield status("🤔 LLM Decision: Sufficient — ready to write report")
                 yield status(f'📋 Reason: {decision["reason"]}')
+
+                # ── Update scratchpad ──
+                scratchpad.update_after_pass(pass_count, current_query, bool(search_results), decision)
+                new_snippets = build_snippet_block(sources, len(sources))
+                summary_prompt = build_summary_prompt(topic, scratchpad, new_snippets)
+                scratchpad.set_summary(run_async(complete(summary_prompt, self.valves)))
+                yield status(f"📝 Scratchpad updated — {scratchpad.stats_line()}")
 
                 if decision["continueSearch"] and decision["nextQuery"]:
                     current_query = decision["nextQuery"]
@@ -1298,6 +1389,8 @@ class Pipeline:
             if preset["enableSubtopicDive"]:
                 yield status("🔬 Identifying key subtopics for deep-dive...")
                 subtopic_prompt = build_subtopic_prompt(topic, all_sources, _eval_snippet_limit)
+                if scratchpad.running_summary:
+                    subtopic_prompt += f"\n\n{scratchpad.to_context_block()}"
                 subtopic_response = run_async(complete(subtopic_prompt, self.valves))
                 subtopics = parse_subtopics(subtopic_response)
 
@@ -1331,6 +1424,11 @@ class Pipeline:
             # ──────────────────────────────────────────
             yield status("⚖️ Analyzing sources for conflicting information and controversy...")
             controversy_prompt = build_controversy_prompt(topic, all_sources, _controversy_snippet_limit)
+            if scratchpad.running_summary:
+                controversy_prompt += (
+                    f"\n\nResearch summary so far (use to focus your analysis):\n"
+                    f"{scratchpad.running_summary}"
+                )
             controversy_analysis = run_async(complete(controversy_prompt, self.valves))
             yield status("✅ Controversy analysis complete.")
 
@@ -1343,6 +1441,12 @@ class Pipeline:
                 topic, all_sources, controversy_analysis, credibility_analysis,
                 _report_snippet_limit, preset, depth_key, cred_level,
             )
+            if scratchpad.running_summary:
+                report_prompt += (
+                    f"\n\nRESEARCH BRIEFING (structured summary from the research process — "
+                    f"use this to organize your report and ensure all key points are covered):\n"
+                    f"{scratchpad.running_summary}"
+                )
             report_body = run_async(complete(report_prompt, self.valves))
             if not report_body or not report_body.strip():
                 yield "\n❌ Deep Research: report generation returned empty output. Try reducing depth or using a model with a larger context window.\n"
