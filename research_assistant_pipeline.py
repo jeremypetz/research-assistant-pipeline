@@ -11,7 +11,6 @@ requirements: requests
 import re
 import json
 import time
-import base64
 import requests
 from datetime import datetime, timezone
 from typing import List, Union, Generator, Iterator, Optional
@@ -76,12 +75,11 @@ SIMPLE_PRESET = {
     "reportWordTarget": "200-400",
 }
 
-SETTINGS_SENTINEL = "<!-- RA_SETTINGS_PENDING:"
+SETTINGS_MARKER = "This looks like a research query!"
 
 
 def build_settings_prompt(topic: str) -> str:
     """Build the two-turn settings menu shown when auto-routing classifies a query as RESEARCH."""
-    encoded_topic = base64.b64encode(topic.encode()).decode()
     return (
         "\U0001f52c **This looks like a research query!** Choose your settings:\n\n"
         "**Depth:**\n"
@@ -90,8 +88,7 @@ def build_settings_prompt(topic: str) -> str:
         "3. \U0001f52c **Thorough** \u2014 6 passes, comprehensive report (2,500\u20134,000 words)\n\n"
         "**Credibility** *(optional \u2014 append to your choice)*:\n"
         "- `credibility:off` \u00b7 `credibility:low` \u00b7 `credibility:medium` *(default)* \u00b7 `credibility:high`\n\n"
-        "**Reply with a number (e.g. `2`) or name (e.g. `standard credibility:high`)**\n\n"
-        f"{SETTINGS_SENTINEL}{encoded_topic} -->"
+        "**Reply with a number (e.g. `2`) or name (e.g. `standard credibility:high`)**"
     )
 
 
@@ -980,6 +977,7 @@ class Pipeline:
     def __init__(self):
         self.name = "Research Assistant"
         self.valves = self.Valves()
+        self._pending_topics = {}  # chat_id → topic for two-turn settings flow
 
     async def on_startup(self):
         pass
@@ -1048,39 +1046,48 @@ class Pipeline:
         yield status("\U0001f50d Parsing query...")
 
         # ── Check for two-turn settings reply ──
-        # If the last assistant message contains the settings sentinel,
-        # the user is replying with their depth/credibility choice.
-        last_assistant = None
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant":
-                last_assistant = msg
-                break
+        # If the pipeline previously showed a settings menu, the user's
+        # current message is their depth/credibility choice.
+        chat_id = body.get("chat_id", "")
+        original_topic = None
 
-        if last_assistant and SETTINGS_SENTINEL in (last_assistant.get("content") or ""):
-            content = last_assistant["content"]
-            try:
-                sentinel_start = content.index(SETTINGS_SENTINEL) + len(SETTINGS_SENTINEL)
-                sentinel_end = content.index(" -->", sentinel_start)
-                encoded_topic = content[sentinel_start:sentinel_end].strip()
-                original_topic = base64.b64decode(encoded_topic).decode()
-            except Exception:
-                original_topic = None
+        # Primary: server-side state from _pending_topics
+        if chat_id and chat_id in self._pending_topics:
+            original_topic = self._pending_topics.pop(chat_id)
 
-            if original_topic:
-                depth_key, cred_level = parse_settings_reply(user_message)
-                if depth_key is None:
-                    yield status("\u26a0\ufe0f Couldn't parse depth selection \u2014 defaulting to **Fast**.")
-                    depth_key = "fast"
-                yield status(
-                    f"\u2699\ufe0f Settings: depth={depth_key.upper()}, "
-                    f"credibility={(cred_level or self.valves.DEFAULT_CREDIBILITY).upper()}"
-                )
-                yield from self._run_research(
-                    original_topic, body,
-                    depth_override=depth_key,
-                    cred_override=cred_level,
-                )
-                return
+        # Fallback: if pipeline restarted, check message history
+        if not original_topic:
+            for i in range(len(messages) - 1, -1, -1):
+                msg = messages[i]
+                if msg.get("role") == "assistant" and SETTINGS_MARKER in (msg.get("content") or ""):
+                    # Found the settings menu — grab the user query that preceded it
+                    if i > 0 and messages[i - 1].get("role") == "user":
+                        prev = messages[i - 1].get("content", "")
+                        # Run same extraction logic pipe() uses
+                        if "Query:" in prev:
+                            prev = prev.rsplit("Query:", 1)[-1].strip().strip('"')
+                        elif len(prev) >= 1000:
+                            prev = ""
+                        fb_topic, _, _ = parse_input(prev, "auto", self.valves.DEFAULT_CREDIBILITY)
+                        if fb_topic:
+                            original_topic = fb_topic
+                    break  # only check the most recent assistant message
+
+        if original_topic:
+            depth_key, cred_level = parse_settings_reply(user_message)
+            if depth_key is None:
+                yield status("\u26a0\ufe0f Couldn't parse depth selection \u2014 defaulting to **Fast**.")
+                depth_key = "fast"
+            yield status(
+                f"\u2699\ufe0f Settings: depth={depth_key.upper()}, "
+                f"credibility={(cred_level or self.valves.DEFAULT_CREDIBILITY).upper()}"
+            )
+            yield from self._run_research(
+                original_topic, body,
+                depth_override=depth_key,
+                cred_override=cred_level,
+            )
+            return
 
         if not actual_user_query.strip():
             yield "\n\u274c No research topic found after parsing. Please enter a topic to research.\n"
@@ -1172,6 +1179,15 @@ class Pipeline:
                 # RESEARCH — ask user for settings (if ASK_DEPTH enabled)
                 if self.valves.ASK_DEPTH:
                     yield status("🔀 Auto-routing: RESEARCH — asking for depth preference...")
+                    # Store topic server-side for retrieval on next turn
+                    _chat_id = body.get("chat_id", "")
+                    if _chat_id:
+                        self._pending_topics[_chat_id] = topic
+                        # Prevent unbounded growth (unlikely but safe)
+                        if len(self._pending_topics) > 500:
+                            oldest = list(self._pending_topics.keys())[:250]
+                            for k in oldest:
+                                self._pending_topics.pop(k, None)
                     yield f"\n{build_settings_prompt(topic)}"
                     return
                 else:
