@@ -11,6 +11,7 @@ requirements: requests
 import re
 import json
 import time
+import base64
 import requests
 from datetime import datetime, timezone
 from typing import List, Union, Generator, Iterator, Optional
@@ -74,6 +75,56 @@ SIMPLE_PRESET = {
     "reportMaxCharsPerSnippet": 1200,
     "reportWordTarget": "200-400",
 }
+
+SETTINGS_SENTINEL = "<!-- RA_SETTINGS_PENDING:"
+
+
+def build_settings_prompt(topic: str) -> str:
+    """Build the two-turn settings menu shown when auto-routing classifies a query as RESEARCH."""
+    encoded_topic = base64.b64encode(topic.encode()).decode()
+    return (
+        "\U0001f52c **This looks like a research query!** Choose your settings:\n\n"
+        "**Depth:**\n"
+        "1. \u26a1 **Fast** \u2014 2 passes, concise report (800\u20131,200 words)\n"
+        "2. \U0001f4ca **Standard** \u2014 4 passes, balanced report (1,500\u20132,500 words)\n"
+        "3. \U0001f52c **Thorough** \u2014 6 passes, comprehensive report (2,500\u20134,000 words)\n\n"
+        "**Credibility** *(optional \u2014 append to your choice)*:\n"
+        "- `credibility:off` \u00b7 `credibility:low` \u00b7 `credibility:medium` *(default)* \u00b7 `credibility:high`\n\n"
+        "**Reply with a number (e.g. `2`) or name (e.g. `standard credibility:high`)**\n\n"
+        f"{SETTINGS_SENTINEL}{encoded_topic} -->"
+    )
+
+
+def parse_settings_reply(text: str) -> tuple:
+    """
+    Parse the user's depth/credibility reply from the two-turn settings prompt.
+    Returns (depth_key | None, cred_level | None).
+    """
+    t = text.strip().lower()
+
+    # \u2500\u2500 Parse credibility if present \u2500\u2500
+    cred_level = None
+    cred_match = re.search(r"\bcredibility:(\w+)\b", t, re.IGNORECASE)
+    if cred_match:
+        val = cred_match.group(1).lower()
+        if val in CREDIBILITY_LEVELS:
+            cred_level = val
+        t = (t[: cred_match.start()] + t[cred_match.end() :]).strip()
+
+    # \u2500\u2500 Parse depth \u2500\u2500
+    depth_map = {
+        "1": "fast",    "fast": "fast",
+        "2": "standard", "standard": "standard",
+        "3": "thorough", "thorough": "thorough",
+    }
+
+    depth_key = None
+    for key, val in depth_map.items():
+        if key in t:
+            depth_key = val
+            break
+
+    return depth_key, cred_level
 
 
 # =============================================================================
@@ -918,6 +969,13 @@ class Pipeline:
             default="medium",
             description="Default source credibility level: off, low, medium, or high",
         )
+        ASK_DEPTH: bool = Field(
+            default=True,
+            description=(
+                "When auto-routing classifies a query as RESEARCH, ask the user to choose "
+                "depth/credibility before proceeding. Disable to always default to fast."
+            ),
+        )
 
     def __init__(self):
         self.name = "Research Assistant"
@@ -989,6 +1047,41 @@ class Pipeline:
 
         yield status("\U0001f50d Parsing query...")
 
+        # ── Check for two-turn settings reply ──
+        # If the last assistant message contains the settings sentinel,
+        # the user is replying with their depth/credibility choice.
+        last_assistant = None
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                last_assistant = msg
+                break
+
+        if last_assistant and SETTINGS_SENTINEL in (last_assistant.get("content") or ""):
+            content = last_assistant["content"]
+            try:
+                sentinel_start = content.index(SETTINGS_SENTINEL) + len(SETTINGS_SENTINEL)
+                sentinel_end = content.index(" -->", sentinel_start)
+                encoded_topic = content[sentinel_start:sentinel_end].strip()
+                original_topic = base64.b64decode(encoded_topic).decode()
+            except Exception:
+                original_topic = None
+
+            if original_topic:
+                depth_key, cred_level = parse_settings_reply(user_message)
+                if depth_key is None:
+                    yield status("\u26a0\ufe0f Couldn't parse depth selection \u2014 defaulting to **Fast**.")
+                    depth_key = "fast"
+                yield status(
+                    f"\u2699\ufe0f Settings: depth={depth_key.upper()}, "
+                    f"credibility={(cred_level or self.valves.DEFAULT_CREDIBILITY).upper()}"
+                )
+                yield from self._run_research(
+                    original_topic, body,
+                    depth_override=depth_key,
+                    cred_override=cred_level,
+                )
+                return
+
         if not actual_user_query.strip():
             yield "\n\u274c No research topic found after parsing. Please enter a topic to research.\n"
             return
@@ -998,7 +1091,8 @@ class Pipeline:
         # Delegate to the research pipeline generator
         yield from self._run_research(actual_user_query, body)
 
-    def _run_research(self, user_message: str, body: dict) -> Generator:
+    def _run_research(self, user_message: str, body: dict,
+                      depth_override: str = None, cred_override: str = None) -> Generator:
         """
         Synchronous generator that orchestrates the full research pipeline.
         Uses synchronous wrappers around the async helpers since Open WebUI
@@ -1012,6 +1106,10 @@ class Pipeline:
             self.valves.DEFAULT_DEPTH,
             self.valves.DEFAULT_CREDIBILITY,
         )
+        if depth_override:
+            depth_key = depth_override
+        if cred_override:
+            cred_level = cred_override
         if not topic:
             yield "❌ No research topic provided. Please enter a topic to research."
             return
@@ -1071,9 +1169,14 @@ class Pipeline:
                     yield f"\n{simple_report}"
                     return
 
-                # RESEARCH or ambiguous → default to fast
-                depth_key = "fast"
-                yield status("🔀 Auto-routing: RESEARCH (fast) — proceeding with deep research")
+                # RESEARCH — ask user for settings (if ASK_DEPTH enabled)
+                if self.valves.ASK_DEPTH:
+                    yield status("🔀 Auto-routing: RESEARCH — asking for depth preference...")
+                    yield f"\n{build_settings_prompt(topic)}"
+                    return
+                else:
+                    depth_key = "fast"
+                    yield status("🔀 Auto-routing: RESEARCH (fast) — proceeding with deep research")
 
             # ──────────────────────────────────────────
             # STAGE 2: Resolve preset
