@@ -1,6 +1,68 @@
-# Research Assistant Pipeline v1.1
+# Research Assistant Pipeline v1.2
 
 A multi-pass deep research pipeline for [Open WebUI](https://github.com/open-webui/open-webui) that performs automated web research with LLM-driven gap analysis, cross-pass scratchpad memory, controversy detection, source credibility scoring, and structured report generation.
+
+## Quick Start
+
+1. Copy `_research_assistant_base.py` and `Research_Assistant.py` into your Open WebUI pipelines directory
+2. The pipeline auto-loads on next restart (requires `requests` — installed automatically)
+3. Configure valves in the Open WebUI admin panel
+
+## Architecture: Base + Wrappers (v1.2)
+
+The pipeline uses a **base + wrapper** pattern:
+
+```
+pipelines/
+├── _research_assistant_base.py   ← Full pipeline code (not discovered by Open-WebUI)
+├── Research_Assistant.py          ← Wrapper → appears as "Research Assistant"
+└── My_Other_Instance.py           ← Wrapper → appears as "My Other Instance"
+```
+
+**How it works:**
+
+- `_research_assistant_base.py` contains all the pipeline logic. The leading `_` prevents Open-WebUI from auto-discovering it as a model.
+- Each **wrapper file** is ~20 lines. It imports the base `Pipeline` class, subclasses it, and sets a unique `self.name` with optional valve overrides.
+- Each wrapper registers as a **separate model** in Open-WebUI with **fully independent valve configuration**.
+- Updates to the base file apply to all wrappers automatically.
+
+### Creating a New Wrapper
+
+Create a new `.py` file in the pipelines directory:
+
+```python
+"""
+title: My Custom Research
+author: You
+version: 1.0
+"""
+from _research_assistant_base import Pipeline as _Base
+
+
+class Pipeline(_Base):
+    def __init__(self):
+        super().__init__()
+        self.name = "My Custom Research"
+        # Override any defaults — or omit to use base defaults:
+        self.valves = self.Valves(
+            OPENAI_API_BASE_URL="https://api.openai.com/v1",
+            OPENAI_API_KEY="sk-...",
+            MODEL_ID="gpt-4o",
+            SEARCH_PROVIDER="tavily",
+            TAVILY_API_KEY="tvly-...",
+        )
+```
+
+Restart the pipelines container and the new model appears in Open-WebUI with its own Valves panel.
+
+### Example Use Cases
+
+| Wrapper | LLM Provider | Search Provider | Purpose |
+|---|---|---|---|
+| `Research_Assistant.py` | Ollama (local) | SearXNG + Crawl4AI | Default, self-hosted |
+| `Research_OpenAI.py` | OpenAI GPT-4o | Tavily | Higher quality, cloud-based |
+| `Research_Anthropic.py` | Anthropic Claude | SearXNG | Privacy-focused, cloud LLM |
+| `Research_Uncensored.py` | Ollama (uncensored model) | SearXNG | Unrestricted research |
 
 ## Features
 
@@ -11,7 +73,7 @@ A multi-pass deep research pipeline for [Open WebUI](https://github.com/open-web
 | **Tavily** | Single API call returns URLs + full-page content | Simplicity, no self-hosting |
 | **SearXNG + Crawl4AI** | Two-stage: SearXNG for URLs/snippets, then Crawl4AI for full-page markdown extraction | Privacy, self-hosted setups |
 
-Switch between providers via the `SEARCH_PROVIDER` valve -- no code changes needed.
+Switch between providers via the `SEARCH_PROVIDER` valve — no code changes needed.
 
 ### Intelligent Auto-Routing
 
@@ -28,11 +90,11 @@ When a query is classified as RESEARCH and `ASK_DEPTH` is enabled (default), the
 This looks like a research query! Choose your settings:
 
 Depth:
-1. Fast -- 2 passes, concise report (800-1,200 words)
-2. Standard -- 4 passes, balanced report (1,500-2,500 words)
-3. Thorough -- 6 passes, comprehensive report (2,500-4,000 words)
+1. Fast — 2 passes, concise report (800-1,200 words)
+2. Standard — 4 passes, balanced report (1,500-2,500 words)
+3. Thorough — 6 passes, comprehensive report (2,500-4,000 words)
 
-Credibility (optional -- append to your choice):
+Credibility (optional — append to your choice):
 - credibility:off, credibility:low, credibility:medium (default), credibility:high
 
 Reply with a number (e.g. 2) or name (e.g. standard credibility:high)
@@ -67,10 +129,10 @@ Four levels of source credibility analysis, configurable per-query:
 The pipeline maintains an in-memory **Scratchpad** that accumulates structured research state across all search passes. After each pass, an LLM call generates a compact running summary that merges new findings with previous knowledge.
 
 **What the scratchpad tracks:**
-- **Covered areas** -- aspects of the topic confirmed as well-researched
-- **Open gaps** -- known information gaps that still need investigation
-- **Dead ends** -- queries that returned no useful results (so they are not retried)
-- **Running summary** -- a concise 5-8 bullet summary updated after every pass
+- **Covered areas** — aspects of the topic confirmed as well-researched
+- **Open gaps** — known information gaps that still need investigation
+- **Dead ends** — queries that returned no useful results (so they are not retried)
+- **Running summary** — a concise 5-8 bullet summary updated after every pass
 
 **Where the scratchpad is injected:**
 
@@ -83,21 +145,21 @@ The pipeline maintains an in-memory **Scratchpad** that accumulates structured r
 
 **Status output per pass:**
 ```
-Scratchpad updated -- 1 covered | 2 gaps | 0 dead ends
+Scratchpad updated — 1 covered | 2 gaps | 0 dead ends
 ```
 
 **Cost:** One additional LLM call per search pass (~2-3 seconds) to generate the running summary. This is offset by fewer wasted search passes due to smarter gap analysis.
 
 ### 8-Stage Research Pipeline
 
-1. **Query Classification** -- SIMPLE vs RESEARCH routing
-2. **Interactive Settings** -- depth/credibility selection (RESEARCH only)
-3. **Dynamic Search Loop** -- multi-pass search with LLM-driven gap analysis and scratchpad memory
-4. **Counter-Perspective Search** -- dedicated search for criticism, controversy, and limitations (Standard+)
-5. **Subtopic Deep-Dive** -- LLM identifies under-covered subtopics, guided by scratchpad (Thorough only)
-6. **Source Credibility Scoring** -- per-source authority, bias, and reliability assessment
-7. **Controversy Analysis** -- conflicting claims, expert disagreement, jurisdictional variance, informed by scratchpad summary
-8. **Report Synthesis** -- structured report with inline citations, data tables, confidence ratings, and scratchpad briefing
+1. **Query Classification** — SIMPLE vs RESEARCH routing
+2. **Interactive Settings** — depth/credibility selection (RESEARCH only)
+3. **Dynamic Search Loop** — multi-pass search with LLM-driven gap analysis and scratchpad memory
+4. **Counter-Perspective Search** — dedicated search for criticism, controversy, and limitations (Standard+)
+5. **Subtopic Deep-Dive** — LLM identifies under-covered subtopics, guided by scratchpad (Thorough only)
+6. **Source Credibility Scoring** — per-source authority, bias, and reliability assessment
+7. **Controversy Analysis** — conflicting claims, expert disagreement, jurisdictional variance, informed by scratchpad summary
+8. **Report Synthesis** — structured report with inline citations, data tables, confidence ratings, and scratchpad briefing
 
 ### Live Status Messages
 
@@ -110,8 +172,8 @@ Auto-routing: classifying query...
 Search pass 1/4: "health effects of intermittent fasting"
 Content quality: 4/5 rich results | avg 2340 chars | 80% rich
 Evaluating research completeness after pass 1...
-LLM Decision: Continue -- "intermittent fasting long-term studies"
-Scratchpad updated -- 0 covered | 1 gaps | 0 dead ends
+LLM Decision: Continue — "intermittent fasting long-term studies"
+Scratchpad updated — 0 covered | 1 gaps | 0 dead ends
 ...
 Synthesizing final report from 23 unique sources...
 Deep research complete!
@@ -130,13 +192,9 @@ Every research report includes:
 - **Confidence ratings** (HIGH / MEDIUM / LOW) for major findings
 - **Markdown tables** for data comparisons
 
-## Installation
-
-1. Copy `research_assistant_pipeline.py` into your Open WebUI pipelines directory
-2. The pipeline will auto-load on next restart (requires `requests` -- installed automatically)
-3. Configure valves in the Open WebUI admin panel
-
 ## Configuration (Valves)
+
+Each wrapper instance has its own independent valve configuration:
 
 | Valve | Default | Description |
 |---|---|---|
@@ -210,35 +268,50 @@ docker run -d -p 11235:11235 unclecode/crawl4ai
 ## Architecture
 
 ```
+pipelines/
+├── _research_assistant_base.py          ← Not discovered (leading _)
+├── Research_Assistant.py                ← Wrapper: "Research Assistant"
+└── Other_Wrapper.py                     ← Wrapper: "Other Wrapper"
+
+Each wrapper:
+  from _research_assistant_base import Pipeline as _Base
+  class Pipeline(_Base): ...
+
 User Query
-    |
-    v
-+-------------+
-|  pipe()     |--- Skip internal tasks (title gen, tags, etc.)
-|  (generator)|--- Extract actual query from Open-WebUI formatting
-|             |--- Detect two-turn settings reply
-+------+------+
-       |
-       v
-+------------------+
-| _run_research()  |
-|  (generator)     |
-+------------------+
-| 1. Classification|---> SIMPLE: quick search -> concise answer -> done
-| 2. Settings menu |---> ASK_DEPTH? show menu, wait for reply
-| 3. Search loop   |---> Multi-pass + LLM gap eval + scratchpad memory
-| 4. Counter-persp |---> Criticism/controversy search (Standard+)
-| 5. Subtopic dive |---> Deep-dive, guided by scratchpad (Thorough)
-| 6. Credibility   |---> Per-source scoring
-| 7. Controversy   |---> Conflict analysis, informed by scratchpad
-| 8. Report        |---> Synthesis with scratchpad briefing + citations
-+------------------+
-       |
-       v
+    │
+    ▼
+┌─────────────┐
+│  pipe()      │── Skip internal tasks (title gen, tags, etc.)
+│  (generator) │── Extract actual query from Open-WebUI formatting
+│              │── Detect two-turn settings reply
+└──────┬──────┘
+       │
+       ▼
+┌──────────────────┐
+│ _run_research()  │
+│  (generator)     │
+├──────────────────┤
+│ 1. Classification│──▶ SIMPLE: quick search → concise answer → done
+│ 2. Settings menu │──▶ ASK_DEPTH? show menu, wait for reply
+│ 3. Search loop   │──▶ Multi-pass + LLM gap eval + scratchpad memory
+│ 4. Counter-persp │──▶ Criticism/controversy search (Standard+)
+│ 5. Subtopic dive │──▶ Deep-dive, guided by scratchpad (Thorough)
+│ 6. Credibility   │──▶ Per-source scoring
+│ 7. Controversy   │──▶ Conflict analysis, informed by scratchpad
+│ 8. Report        │──▶ Synthesis with scratchpad briefing + citations
+└──────────────────┘
+       │
+       ▼
   Assembled Report (Markdown)
 ```
 
 ## Changelog
+
+### v1.2 (2026-03-02)
+- **Wrapper pattern**: Base pipeline renamed to `_research_assistant_base.py` (hidden from Open-WebUI auto-discovery)
+- **Thin wrapper files**: Each wrapper is ~20 lines, imports the base, registers as a separate model with independent valves
+- `Research_Assistant.py` included as the default wrapper
+- Enables running multiple instances with different LLM providers, models, or search configurations simultaneously
 
 ### v1.1 (2026-03-01)
 - **Scratchpad memory**: Cross-pass research state tracking with running LLM-generated summaries
@@ -258,7 +331,7 @@ User Query
 
 ## Known Issues
 
-- Open-WebUI's built-in Web Search feature may interfere -- disable it for this model
+- Open-WebUI's built-in Web Search feature may interfere — disable it for this model
 - Internal task detection (title generation, follow-up suggestions, tags) may need tuning for your Open-WebUI configuration
 - `__event_emitter__` is not injected into pipeline `pipe()` calls by Open-WebUI, so collapsible status panels are not available; status is delivered via inline text yields instead
 
