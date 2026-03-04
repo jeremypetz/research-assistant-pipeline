@@ -2,7 +2,7 @@
 title: Research Assistant
 author: Jeremy
 date: 2026-03-02
-version: 1.2
+version: 1.2.1
 license: MIT
 description: Default Research Assistant wrapper. Configure valves in the Open-WebUI admin panel.
 """
@@ -15,7 +15,7 @@ _pipelines_dir = os.path.dirname(os.path.abspath(__file__))
 if _pipelines_dir not in sys.path:
     sys.path.insert(0, _pipelines_dir)
 
-from research_assistant_base import Pipeline as _Base
+from research_assistant_base._research_assistant_base import Pipeline as _Base
 
 
 class Pipeline(_Base):

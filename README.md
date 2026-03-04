@@ -1,14 +1,14 @@
-# Research Assistant Pipeline v1.2
+# Research Assistant Pipeline v1.2.1
 
 A multi-pass deep research pipeline for [Open WebUI](https://github.com/open-webui/open-webui) that performs automated web research with LLM-driven gap analysis, cross-pass scratchpad memory, controversy detection, source credibility scoring, and structured report generation.
 
 ## Quick Start
 
-1. Copy `_research_assistant_base.py` and `Research_Assistant.py` into your Open WebUI pipelines directory
+1. Copy `research_assistant_base/` and `Research_Assistant.py` into your Open WebUI pipelines directory
 2. The pipeline auto-loads on next restart (requires `requests` — installed automatically)
 3. Configure valves in the Open WebUI admin panel
 
-## Architecture: Base + Wrappers (v1.2)
+## Architecture: Base + Wrappers (v1.2.1)
 
 The pipeline uses a **base + wrapper** pattern:
 
@@ -36,7 +36,7 @@ title: My Custom Research
 author: You
 version: 1.0
 """
-from _research_assistant_base import Pipeline as _Base
+from research_assistant_base._research_assistant_base import Pipeline as _Base
 
 
 class Pipeline(_Base):
@@ -274,7 +274,7 @@ pipelines/
 └── Other_Wrapper.py                     ← Wrapper: "Other Wrapper"
 
 Each wrapper:
-  from _research_assistant_base import Pipeline as _Base
+  from research_assistant_base._research_assistant_base import Pipeline as _Base
   class Pipeline(_Base): ...
 
 User Query
@@ -306,6 +306,10 @@ User Query
 ```
 
 ## Changelog
+
+### v1.2.1 (2026-03-03)
+- **Project structure update**: Moved base pipeline into `research_assistant_base/` package directory
+- **Naming standardized**: Base file renamed from `pipeline.py` to `_research_assistant_base.py` for clarity
 
 ### v1.2 (2026-03-02)
 - **Wrapper pattern**: Base pipeline renamed to `_research_assistant_base.py` (hidden from Open-WebUI auto-discovery)

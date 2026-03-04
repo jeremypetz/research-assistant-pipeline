@@ -2,7 +2,7 @@
 title: Research Assistant (Base)
 author: Jeremy
 date: 2026-03-02
-version: 1.2
+version: 1.2.1
 license: MIT
 description: Multi-pass deep research pipeline using Tavily or SearXNG+Crawl4AI for web search, with LLM-driven gap analysis, cross-pass scratchpad memory, controversy detection, source credibility scoring, interactive depth selection, and structured report generation. Use wrapper files to create named instances with independent valve configs.
 requirements: requests
